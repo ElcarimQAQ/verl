@@ -101,7 +101,7 @@ class NaviInteraction(BaseInteraction):
 
         _config.pop("enable_log", None)
 
-        self.name = _config.pop("name")
+        self.name = _config.pop("name", "navi")
         self.user_model = _config.pop("user_model")
 
         self.termination_signal = _config.pop("termination_signal", TERMINATION_SIGNAL)
@@ -120,14 +120,14 @@ class NaviInteraction(BaseInteraction):
         
         if instance_id is None:
             instance_id = str(uuid4())
+        assert "single_turn_prompt" in kwargs, "single_turn_prompt is required in interaction_kwargs"
         self._instance_dict[instance_id] = {
             "response": "",
             "ground_truth": ground_truth,
             "reward": 0.0,
+            "interaction_kwargs": kwargs,
         }
-        self.interaction_kwargs = kwargs
-        logger.info(f"[NaviInteraction] start_interaction completed, instance_id={instance_id}, interaction_kwargs={self.interaction_kwargs}")
-        assert "single_turn_prompt" in kwargs, "single_turn_prompt is required in interaction_kwargs"
+        logger.info(f"[NaviInteraction] start_interaction completed, instance_id={instance_id}, interaction_kwargs={kwargs}")
         return instance_id
 
     @rollout_trace_op
@@ -139,10 +139,11 @@ class NaviInteraction(BaseInteraction):
             "最后一条消息必须来自system或assistant"
         )
 
+        interaction_kwargs = self._instance_dict[instance_id]["interaction_kwargs"]
         chat_history = self._parse_messages(messages, strip_sys_prompt=True)
         prompt = USER_PROMPT_TEMPLATE.format(
-            task_desc=self.interaction_kwargs.get("task_desc", "车载导航任务"),
-            single_turn_prompt=self.interaction_kwargs["single_turn_prompt"],
+            task_desc=interaction_kwargs.get("task_desc", "车载导航任务"),
+            single_turn_prompt=interaction_kwargs["single_turn_prompt"],
             chat_history=chat_history,
             termination_signal=self.termination_signal,
         )

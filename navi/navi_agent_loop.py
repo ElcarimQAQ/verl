@@ -134,6 +134,10 @@ class NaviAgentLoop(ToolAgentLoop):
         # 初始化用户模拟器交互（vendored，替代已被移除的 verl.interactions）
         # interaction 配置路径来自 agent.yaml 的 agent.interaction_config_path
         self.interaction_config_file = agent_config.get('interaction_config_path', None)
+        if self.interaction_config_file and not os.path.isabs(self.interaction_config_file):
+            # 相对路径以 verl 仓库根目录（navi 包的上一级）为基准，避免依赖训练脚本的 CWD
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.interaction_config_file = os.path.join(repo_root, self.interaction_config_file)
         self.interaction_map = {}
         if self.interaction_config_file:
             from navi.interaction_registry import initialize_interactions_from_config
@@ -181,7 +185,7 @@ class NaviAgentLoop(ToolAgentLoop):
         if hasattr(agent_data, 'tool_calls') and agent_data.tool_calls:
             logger.debug(f"[NaviAgent] Initial state: PROCESSING_TOOLS ({len(agent_data.tool_calls)} tool calls)")
             return AgentState.PROCESSING_TOOLS
-        elif self.interaction_config_file:
+        elif agent_data.interaction is not None:
             logger.debug("[NaviAgent] Initial state: INTERACTING")
             return AgentState.INTERACTING
         else:
@@ -290,7 +294,12 @@ class NaviAgentLoop(ToolAgentLoop):
         num_repeats = self._get_num_repeats(status)
         logger.debug(f"[NaviAgent] num_repeats={num_repeats}")
 
-        interaction_requests = [copy_module.deepcopy(agent_data) for _ in range(num_repeats)]
+        interaction_requests = []
+        for _ in range(num_repeats):
+            _agent_data = copy_module.deepcopy(agent_data)
+            # interaction 是有状态的共享服务对象（按 request_id 索引），不应被 deepcopy 复制
+            _agent_data.interaction = interaction
+            interaction_requests.append(_agent_data)
         messages_lst = []
 
         for idx, _agent_data in enumerate(interaction_requests):
@@ -321,6 +330,10 @@ class NaviAgentLoop(ToolAgentLoop):
                 if len(messages_lst[-1]) > prev_msg_len:
                     logger.debug(f"Assistant: ...{messages_lst[-1][prev_msg_len - 1].content[-100:]}")
                     logger.debug(f"User:      {messages_lst[-1][prev_msg_len].content[:100]}...")
+
+        # 释放交互实例的状态（避免 _instance_dict 内存泄漏）
+        if interaction is not None:
+            await interaction.finalize_interaction(request_id)
 
         # 构建输出
         response_ids = agent_data.prompt_ids[-len(agent_data.response_mask):]
@@ -377,9 +390,7 @@ class NaviAgentLoop(ToolAgentLoop):
             logger.debug(f"[NaviAgent] run_agent_data_loop state={state.value}")
             self._print_messages_trajectory(agent_data, f"state={state.value}")
 
-            if state == AgentState.PENDING:
-                state = await self._handle_pending_state(agent_data, sampling_params)
-            elif state == AgentState.GENERATING:
+            if state == AgentState.GENERATING:
                 state = await self._handle_generating_state(agent_data, sampling_params)
             elif state == AgentState.PROCESSING_TOOLS:
                 state = await self._handle_processing_tools_state(agent_data)
@@ -481,7 +492,7 @@ class NaviAgentLoop(ToolAgentLoop):
         agent_data.user_turns += 1
 
         # 如果同时有 notify_user_msg 和其他工具，进入 INTERACTING 状态
-        if has_notify_user_msg and self.interaction_config_file:
+        if has_notify_user_msg and agent_data.interaction is not None:
             logger.debug("[NaviAgent] notify_user_msg + other tools, entering INTERACTING state")
             return AgentState.INTERACTING
 
@@ -700,7 +711,7 @@ class NaviAgentLoop(ToolAgentLoop):
             return AgentState.TERMINATED
 
         # Handle interaction if needed
-        if self.interaction_config_file:
+        if agent_data.interaction is not None:
             assistant_message = await self.loop.run_in_executor(
                 None, lambda: self.tokenizer.decode(agent_data.response_ids, skip_special_tokens=True)
             )
@@ -710,7 +721,7 @@ class NaviAgentLoop(ToolAgentLoop):
         # Determine next state
         if agent_data.tool_calls:
             return AgentState.PROCESSING_TOOLS
-        elif self.interaction_config_file:
+        elif agent_data.interaction is not None:
             return AgentState.INTERACTING
         else:
             return AgentState.TERMINATED
