@@ -1,0 +1,16 @@
+# 交互配置：用户模拟器 (user simulator)
+# 由 NaviAgentLoop.__init__ 通过 navi.interaction_registry.initialize_interactions_from_config 加载，
+# 路径在 navi/config/agent.yaml 的 agent.interaction_config_path 中指定。
+# config 下的字段（除 name 由 registry 注入外）原样传入 NaviInteraction.__init__：
+#   user_model / termination_signal / num_retries 会被取出，其余进入 user_model_kwargs（litellm 调用参数）。
+interaction:
+  - name: "navi"
+    class_name: "navi.navi_interaction.NaviInteraction"
+    config:
+      user_model: "openai/Qwen3-235B-A22B-Thinking-2507-FP8"
+      api_base: "http://localhost:12200/v1"
+      api_key: "sk-no-key-required"
+      num_retries: 3
+      max_tokens: 512
+      temperature: 1.0
+      enable_log: true

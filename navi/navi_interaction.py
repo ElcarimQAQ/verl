@@ -19,7 +19,6 @@ Navigation Interaction Module for user simulation.
 
 import asyncio
 import copy
-import json
 import logging
 import os
 import re
@@ -28,7 +27,8 @@ from uuid import uuid4
 
 import litellm
 
-from verl.interactions.base import BaseInteraction
+from navi.interaction_base import BaseInteraction
+from navi.utils import extract_json
 from verl.utils.rollout_trace import rollout_trace_op
 
 logger = logging.getLogger('NaviInteraction')
@@ -56,6 +56,10 @@ USER_PROMPT_TEMPLATE = """你是一名车载导航系统的用户，正在与AI�
 <|参考目标开始（AI不可见）|>
 {single_turn_prompt}
 <|参考目标结束|>
+
+<|期望结果开始（AI不可见，用于判断AI是否真正满足了你的需求）|>
+{ground_truth}
+<|期望结果结束|>
 
 <|聊天历史开始|>
 {chat_history}
@@ -101,7 +105,7 @@ class NaviInteraction(BaseInteraction):
 
         _config.pop("enable_log", None)
 
-        self.name = _config.pop("name")
+        self.name = _config.pop("name", "navi")
         self.user_model = _config.pop("user_model")
 
         self.termination_signal = _config.pop("termination_signal", TERMINATION_SIGNAL)
@@ -120,14 +124,14 @@ class NaviInteraction(BaseInteraction):
         
         if instance_id is None:
             instance_id = str(uuid4())
+        assert "single_turn_prompt" in kwargs, "single_turn_prompt is required in interaction_kwargs"
         self._instance_dict[instance_id] = {
             "response": "",
             "ground_truth": ground_truth,
             "reward": 0.0,
+            "interaction_kwargs": kwargs,
         }
-        self.interaction_kwargs = kwargs
-        logger.info(f"[NaviInteraction] start_interaction completed, instance_id={instance_id}, interaction_kwargs={self.interaction_kwargs}")
-        assert "single_turn_prompt" in kwargs, "single_turn_prompt is required in interaction_kwargs"
+        logger.info(f"[NaviInteraction] start_interaction completed, instance_id={instance_id}, interaction_kwargs={kwargs}")
         return instance_id
 
     @rollout_trace_op
@@ -139,10 +143,13 @@ class NaviInteraction(BaseInteraction):
             "最后一条消息必须来自system或assistant"
         )
 
+        interaction_kwargs = self._instance_dict[instance_id]["interaction_kwargs"]
+        ground_truth = self._instance_dict[instance_id].get("ground_truth")
         chat_history = self._parse_messages(messages, strip_sys_prompt=True)
         prompt = USER_PROMPT_TEMPLATE.format(
-            task_desc=self.interaction_kwargs.get("task_desc", "车载导航任务"),
-            single_turn_prompt=self.interaction_kwargs["single_turn_prompt"],
+            task_desc=interaction_kwargs.get("task_desc", "车载导航任务"),
+            single_turn_prompt=interaction_kwargs["single_turn_prompt"],
+            ground_truth=ground_truth or "（未提供，以参考目标为准）",
             chat_history=chat_history,
             termination_signal=self.termination_signal,
         )
@@ -171,7 +178,7 @@ class NaviInteraction(BaseInteraction):
 
             try:
                 if isinstance(full_response, str):
-                    full_response = self._extract_json(full_response)
+                    full_response = extract_json(full_response)
             except Exception as e:
                 logger.warning(f"[NaviInteraction] JSON提取失败: {e}. Retrying...")
                 continue
@@ -191,16 +198,19 @@ class NaviInteraction(BaseInteraction):
                     logger.warning(f"[NaviInteraction] 缺少必要字段: {keys}")
                     continue
 
+        if not response:
+            logger.error(
+                f"[NaviInteraction] generate_response exhausted {self.num_retries} retries without a usable "
+                f"reply for instance_id={instance_id}; terminating sequence to avoid training on an empty turn."
+            )
+            return True, response, 0.0, {}
+
         self._instance_dict[instance_id]["response"] = response
         logger.debug(f"[NaviInteraction] User: {response}")
 
-        # 检查是否应该终止
+        # 是否终止完全由模型按 prompt 指示输出的终止信号决定，不再用"谢谢"/"好的"等
+        # 常见礼貌用语做兜底匹配——这些词在正常追问里也很常见，会把还没结束的对话提前截断。
         should_terminate_sequence = self.termination_signal in response
-
-        # 导航特定：检查是否包含导航完成信号
-        nav_completion_signals = ["好的，开始吧", "可以了", "谢谢", "好的", "没问题"]
-        if any(signal in response for signal in nav_completion_signals):
-            should_terminate_sequence = True
 
         reward = 0.0
 
@@ -233,136 +243,3 @@ class NaviInteraction(BaseInteraction):
         if "content" in msg and isinstance(msg["content"], str):
             msg["content"] = re.sub(r"<tool_call>.*?uaiya>", "", msg["content"], flags=re.DOTALL).strip()
         return msg
-
-    def _extract_json(self, s: str) -> dict:
-        """从字符串中提取JSON对象"""
-        def convert_value(value):
-            true_values = {"true": True, "false": False, "null": None}
-            value_lower = value.lower()
-            if value_lower in true_values:
-                return true_values[value_lower]
-            try:
-                if "." in value or "e" in value.lower():
-                    return float(value)
-                else:
-                    return int(value)
-            except ValueError:
-                return value
-
-        def skip_whitespace(s, pos):
-            while pos < len(s) and s[pos] in " \t\n\r":
-                pos += 1
-            return pos
-
-        def parse_string(s, pos):
-            quote_char = s[pos]
-            assert quote_char in ('"', "'")
-            pos += 1
-            result = ""
-            while pos < len(s):
-                c = s[pos]
-                if c == "\\":
-                    pos += 1
-                    if pos >= len(s):
-                        raise ValueError("Invalid escape sequence")
-                    c = s[pos]
-                    escape_sequences = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", quote_char: quote_char}
-                    result += escape_sequences.get(c, c)
-                elif c == quote_char:
-                    pos += 1
-                    converted_value = convert_value(result)
-                    return converted_value, pos
-                else:
-                    result += c
-                pos += 1
-            raise ValueError("Unterminated string")
-
-        def parse_key(s, pos):
-            pos = skip_whitespace(s, pos)
-            if s[pos] in ('"', "'"):
-                key, pos = parse_string(s, pos)
-                return key, pos
-            else:
-                raise ValueError(f"Expected string for key at position {pos}")
-
-        def parse_number(s, pos):
-            start = pos
-            while pos < len(s) and s[pos] in "-+0123456789.eE":
-                pos += 1
-            num_str = s[start:pos]
-            try:
-                if "." in num_str or "e" in num_str.lower():
-                    return float(num_str), pos
-                else:
-                    return int(num_str), pos
-            except ValueError:
-                raise ValueError(f"Invalid number at position {start}: {num_str}")
-
-        def parse_array(s, pos):
-            lst = []
-            assert s[pos] == "["
-            pos += 1
-            pos = skip_whitespace(s, pos)
-            while pos < len(s) and s[pos] != "]":
-                value, pos = parse_value(s, pos)
-                lst.append(value)
-                pos = skip_whitespace(s, pos)
-                if pos < len(s) and s[pos] == ",":
-                    pos += 1
-                    pos = skip_whitespace(s, pos)
-            if pos >= len(s) or s[pos] != "]":
-                raise ValueError('Expected "]"')
-            pos += 1
-            return lst, pos
-
-        def parse_object(s, pos):
-            obj = {}
-            assert s[pos] == "{"
-            pos += 1
-            pos = skip_whitespace(s, pos)
-            while pos < len(s) and s[pos] != "}":
-                pos = skip_whitespace(s, pos)
-                key, pos = parse_key(s, pos)
-                pos = skip_whitespace(s, pos)
-                if pos >= len(s) or s[pos] != ":":
-                    raise ValueError(f'Expected ":" at position {pos}')
-                pos += 1
-                pos = skip_whitespace(s, pos)
-                value, pos = parse_value(s, pos)
-                obj[key] = value
-                pos = skip_whitespace(s, pos)
-                if pos < len(s) and s[pos] == ",":
-                    pos += 1
-            if pos >= len(s) or s[pos] != "}":
-                raise ValueError('Expected "}"')
-            pos += 1
-            return obj, pos
-
-        def parse_value(s, pos):
-            pos = skip_whitespace(s, pos)
-            if pos >= len(s):
-                raise ValueError("Unexpected end of input")
-            if s[pos] == "{":
-                return parse_object(s, pos)
-            elif s[pos] == "[":
-                return parse_array(s, pos)
-            elif s[pos] in ('"', "'"):
-                return parse_string(s, pos)
-            elif s[pos : pos + 4].lower() == "true":
-                return True, pos + 4
-            elif s[pos : pos + 5].lower() == "false":
-                return False, pos + 5
-            elif s[pos : pos + 4].lower() == "null":
-                return None, pos + 4
-            elif s[pos] in "-+0123456789.":
-                return parse_number(s, pos)
-            else:
-                raise ValueError(f"Unexpected character at position {pos}: {s[pos]}")
-
-        json_start = s.index("{")
-        json_end = s.rfind("}")
-        s = s[json_start : json_end + 1]
-
-        s = s.strip()
-        result, pos = parse_value(s, 0)
-        return result

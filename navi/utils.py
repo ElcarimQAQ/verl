@@ -231,31 +231,23 @@ def validate_tool_call(tool_name: str, tool_args: Dict, history: List[Dict]) -> 
         if not has_destination:
             return False, "navigation_start called without confirmed destination"
 
-    # 规则2: 检查参数完整性
+    # 规则2: 检查参数完整性（与 navi_sandbox_tool.NAVI_TOOL_SCHEMAS 中的 v21 工具定义保持一致）
     required_params = {
-        "search_poi": ["keyword"],
-        "search_along_route": ["keyword"],
-        "navigation_start": ["dest_lat", "dest_lon"],
-        "set_destination": ["lat", "lon"],
+        "poi_search": ["mode", "keyword"],
+        "navigation_start": ["mode", "desLocationReference"],
+        "navigation_route": ["mode"],
+        "navigation_info_query": ["mode"],
+        "navigation_memory": ["mode"],
+        "navigation_pathPoint": ["mode"],
+        "filter": ["reference"],
+        "notify_user_msg": ["msg"],
+        "wiki_search": ["query"],
     }
 
     if tool_name in required_params:
         for param in required_params[tool_name]:
             if param not in tool_args or not tool_args[param]:
                 return False, f"Missing required parameter: {param}"
-
-    # 规则3: 检查坐标有效性
-    coord_params = ["lat", "lon", "dest_lat", "dest_lon", "origin_lat", "origin_lon"]
-    for param in coord_params:
-        if param in tool_args:
-            try:
-                val = float(tool_args[param])
-                if "lat" in param and not (-90 <= val <= 90):
-                    return False, f"Invalid latitude: {val}"
-                if "lon" in param and not (-180 <= val <= 180):
-                    return False, f"Invalid longitude: {val}"
-            except (ValueError, TypeError):
-                return False, f"Invalid coordinate value for {param}"
 
     return True, "valid"
 

@@ -353,7 +353,7 @@ pip install -e /path/to/deepthink-agent
 
 ```yaml
 - name: navi_agent
-  _target_: recipe.navi.navi_agent_loop.NaviAgentLoop
+  _target_: navi.navi_agent_loop.NaviAgentLoop
 ```
 
 ### 工具配置 (`config/navi_tool_config.yaml`)
@@ -362,7 +362,7 @@ pip install -e /path/to/deepthink-agent
 
 ```yaml
 tools:
-  - class_name: recipe.navi.navi_sandbox_tool.NaviSandboxTool
+  - class_name: navi.navi_sandbox_tool.NaviSandboxTool
     config:
       type: native
       use_real_car_format: true
@@ -392,7 +392,7 @@ tools:
 ```yaml
 interaction:
   - name: "navi"
-    class_name: "recipe.navi.navi_interaction.NaviInteraction"
+    class_name: "navi.navi_interaction.NaviInteraction"
     config: {
       "user_model": "openai/Qwen3-235B-A22B-Thinking-2507-FP8",
       "api_base": "http://localhost:12200/v1",

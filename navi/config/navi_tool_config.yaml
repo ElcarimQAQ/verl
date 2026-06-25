@@ -1,0 +1,564 @@
+# 工具配置：导航沙盒工具定义（共 21 个工具，对应 v21 主 prompt 版本：两点不选点-带current_location_api 带车位+充电站+服务区+多远多久堵不堵 202506主prompt）
+tools:
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: poi_search
+      description: 搜索地点，会返回POI列表
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 搜索模式,`沿途`搜返回导航路线上顺路的地址;`周边`返回的是周边的地址列表;`关键词`搜索优先返回本城市内容，如果本城市没有搜到会返回全国的结果
+            enum:
+            - 沿途
+            - 周边
+            - 关键词
+            default: 关键词
+          keyword:
+            type: string
+            description: 搜索的地址字符串
+          centerLocationReference:
+            type: string
+            description: 周边搜：搜索的中心地址索引，仅在周边搜索的时候使用，未指定时默认为当前位置，使用POI或子POI索引
+        required:
+        - mode
+        - keyword
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: charging_station_search
+      description: 搜索充电站，会返回 POI 列表
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 搜索模式
+            enum:
+            - 沿途
+            - 周边
+            - 关键词
+            default: 关键词
+          keyword:
+            type: string
+            description: 搜索的地址字符串
+          centerLocationReference:
+            type: string
+            description: 周边搜：搜索的中心地址索引，仅在周边搜索的时候使用，未指定时默认为当前位置，使用 POI 或子 POI 索引
+          radius:
+            type: number
+            description: 周边搜：搜索范围的半径，仅在周边搜索的时候使用，单位千米，默认 5 千米
+          chargePower:
+            type: string
+            description: 充电功率筛选条件
+            enum:
+            - 快充
+            - 超充
+            - 慢充
+            - 不要快充
+            - 不要超充
+            - 不要慢充
+          brand:
+            type: string
+            description: 充电品牌筛选，充电站品牌不存在枚举类型中时不填
+            enum:
+            - 小桔
+            - 特来电
+            - 国网
+            - 新电途
+            - 南网
+            - 伊威能源
+            - 快电
+            - 星星充电
+            - 蔚蓝快充
+            - 开迈斯
+            - 万马爱充
+            - 云快充
+            - 万城万充
+          sortType:
+            type: string
+            description: 充电站排序类型
+            enum:
+            - 距离排序
+            - 价格排序
+            - 剩余桩数排序
+        required:
+        - mode
+        - keyword
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_start
+      description: 执行导航相关操作。
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 导航场景下不同的行为,`导航`会刷新当前导航状态;`查找路线`不修改任何状态;`展示规划`代表在`导航`基础上把多个途径点页面展示给用户
+            enum:
+            - 导航
+            - 查找路线
+            - 展示规划
+          desLocationReference:
+            type: string
+            description: 导航目的地的POI或子POI索引。隐式表达的导航需求要合理推测该参数。
+          pathPointReference:
+            type: array
+            description: 选择添加途经点时使用，填入途径点的POI或子POI索引
+          routeType:
+            type: string
+            description: 选择的路线偏好类型，用于直接选择路线类型，最优路线默认指“智能推荐”
+            enum:
+            - 智能推荐
+            - 速度最快
+            - 不走高速
+            - 高速优先
+            - 避免拥堵
+            - 避免收费
+            - 大路优先
+          includedRoadName:
+            type: array
+            description: 导航路线上用户期望经过的路名列表，元素必须为道路名，禁止填入地点名称
+          excludedRoadName:
+            type: array
+            description: 导航路线上用户期望避免经过的路名列表，元素必须为道路名，禁止填入地点名称
+        required:
+        - mode
+        - desLocationReference
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: notify_user_msg
+      description: 智能汽车语音助手与用户交互的播报工具，用于询问或回复
+      parameters:
+        type: object
+        properties:
+          msg:
+            type: string
+            description: 播报内容
+          status:
+            type: string
+            description: 如果播报内容属于询问内容并期待用户回答，则播报状态是waiting；如果播报时发现当前任务已经完成，需要播报总结信息或者助手保持沉默，则播报状态是complete。如果不填写该字段默认状态为complete。
+            enum:
+            - waiting
+            - complete
+        required:
+        - msg
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: reject
+      description: 通用语言工具(有更合适工具的场景不使用本工具)：仅当检测到用户输入完全无明确语义（如无意义的乱码字符 “asdf”“jkl;”、随机字母组合、无法识别的符号串）、包含暴力内容（如描述伤害他人的行为、宣扬暴力的言论）、涉及违法信息（如教唆犯罪、传播违法活动）、车内不同乘客之间的对话、用户指令与导航无关以及其他【工具】无法解决用户需求时调用，拒绝对当前用户指令产生回应
+      parameters:
+        type: object
+        properties: {}
+        required: []
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: wiki_search
+      description: 调用联网搜索API，搜索需要背景知识的模糊导航地点
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: 改写的要查询的模糊导航地点，只填入要查询的地点相关的信息
+        required:
+        - query
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_route
+      description: 路线选择或路线刷新操作
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 路线选择操作
+            enum:
+            - 路线偏好
+            - 刷新
+          routeType:
+            type: string
+            description: 选择的路线偏好类型，用于直接选择路线类型，最优路线默认指“智能推荐”
+            enum:
+            - 智能推荐
+            - 速度最快
+            - 不走高速
+            - 高速优先
+            - 避免拥堵
+            - 避免收费
+            - 大路优先
+          includedRoadName:
+            type: array
+            description: 导航路线上用户期望经过的路名列表，元素必须为道路名，禁止填入地点名称
+          excludedRoadName:
+            type: array
+            description: 导航路线上用户期望避免经过的路名列表，元素必须为道路名，禁止填入地点名称
+          routeIndex:
+            type: number
+            description: 用户期望切换的第几条路线，路线信息在环境信息中，属于路线偏好mode
+        required:
+        - mode
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: NEXT_PAGE
+      description: 页面控制:下一页
+      parameters:
+        type: object
+        properties:
+          nextPageType:
+            type: string
+            description: 翻页类型，必须填写nextPage
+        required:
+        - nextPageType
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: BACK_PAGE
+      description: 页面控制:上一页
+      parameters:
+        type: object
+        properties:
+          backPageType:
+            type: string
+            description: 翻页类型，必须填写previousPage
+        required:
+        - backPageType
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: SELECT_PAGE
+      description: 页面控制:页面跳转到指定页
+      parameters:
+        type: object
+        properties:
+          index:
+            type: string
+            description: 指定跳转的页数，需要填入数字
+        required:
+        - index
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_control
+      description: 控制导航退出/返回/继续等，`继续`是指选用上次导航的路线，`返回`是指界面返回到地图主界面。`退出搜索页面`是指搜索后选点的时候用户表达不想去了，需要使用这个参数把搜索展示的页面退出。`退出`是指如果用户在开始导航后表达不想去路线中的所有地点时，应该直接退出导航！此工具调用不受当前是否在导航中的影响，因此可以连续多次调用。
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 选择控制的模式
+            enum:
+            - 退出
+            - 返回
+            - 继续当前导航
+            - 继续上一次导航
+            - 退出搜索页面
+        required:
+        - mode
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_mapZoom
+      description: 控制导航地图的大小和视角，可通过不同参数精准调整地图显示效果。此工具调用不受当前是否在导航中的影响,且可以在上下文中连续多次调用。
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 选择地图设置项，不同模式对应不同的调整参数
+            enum:
+            - 放大
+            - 缩小
+            - 设置大小
+            - 视角
+          percent:
+            type: string
+            description: 用百分比控制地图大小
+          number:
+            type: string
+            description: 用具体数值控制地图大小
+          fraction:
+            type: string
+            description: 用分数控制地图大小
+          level:
+            type: string
+            description: 用档位控制地图大小
+          multiple:
+            type: string
+            description: 用倍数控制地图缩放幅度
+          extremeValue:
+            type: string
+            description: 将地图设置到最大或最小
+            enum:
+            - max
+            - min
+          dimension:
+            type: string
+            description: 设置地图视角为2D或3D，该参数需要配合mode为视角
+            enum:
+            - 2D
+            - 3D
+          direction:
+            type: string
+            description: 设置地图视角为北向上或车头向上，该参数需要配合mode为视角
+            enum:
+            - 北向上
+            - 车头向上
+        required:
+        - mode
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_function_switch
+      description: 打开/关闭导航相关的功能项，通过开关状态与具体功能项组合，实现导航子功能的控制。此工具调用不受当前是否在导航中的影响,且可以在上下文中连续多次调用。
+      parameters:
+        type: object
+        properties:
+          switch:
+            type: boolean
+            description: 导航功能项开关，true表示打开目标功能，false表示关闭目标功能
+          function:
+            type: string
+            description: 需控制的导航功能项，与switch配合使用以完成功能开关，用户描述全览/路线全览/导航全览代表功能项为`路线全景`,用户描述固定全览/路线固定全览/导航固定全览代表功能项为`路线固定全景`
+            enum:
+            - 路线全景
+            - 路线固定全景
+            - 路况
+            - 巡航
+        required:
+        - switch
+        - function
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_broadCastMode_set
+      description: 控制导航播报功能的模式，支持标准、简洁、详细、关闭四种播报模式切换
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 导航播报模式：标准（默认，常规路口/限速提醒）、简洁（仅重要路口提醒）、详细（含车道/距离/实时路况）、关闭（无语音播报）
+            enum:
+            - 标准
+            - 简洁
+            - 详细
+            - 关闭
+            default: 标准
+        required:
+        - mode
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_info_query
+      description: 查询导航路线上的途经点距离和时间，还可以查询服务区以及服务区设施信息，设施包括充电站，加油站，商店，美食，修理站。
+      parameters:
+        type: object
+        properties:
+          mode:
+            type: string
+            description: 需要查询的相关信息
+            enum:
+            - 途经点
+            - 服务区
+        required:
+        - mode
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: navigation_roadcondition_query
+      description: 获取或查询两个地点A和B之间的路况拥堵情况信息，如果不指定地点则查询当前导航路线的路况
+      parameters:
+        type: object
+        properties:
+          startReference:
+            type: string
+            description: 起点的 POI 或子 POI 索引，如果不填默认为本车位置
+          endReference:
+            type: string
+            description: 终点的 POI 或子 POI 索引
+        required: []
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: share_poi
+      description: 传递给其他外部Agent想要的POI信息
+      parameters:
+        type: object
+        properties:
+          locationReference:
+            type: string
+            description: 要进行传递的地址索引，使用POI或子POI索引，当没找到相对应的索引时，不填写该参数。
+          status:
+            type: string
+            description: 可选参数，不填写默认complete。如果成功找到了其他Agent想要的数据的索引，可以不填写或者填写complete；如果在上下文和环境信息里没找到想要的索引，必须要填写fail告知其他Agent
+            enum:
+            - complete
+            - fail
+        required: []
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: filter
+      description: 对搜索得到的POI列表进行字段筛选,支持同时输入多个筛选条件，不填代表此字段无筛选条件。会返回筛选后的POI列表
+      parameters:
+        type: object
+        properties:
+          reference:
+            type: string
+            description: 选择要操作的工具返回列表，填入POI列表索引，即ref_name
+          distance_min:
+            type: number
+            description: 最低距离，填公里
+          distance_max:
+            type: number
+            description: 最高距离，填公里
+          rating_min:
+            type: number
+            description: 最低评分,取值范围从0.0到5.0
+          rating_max:
+            type: number
+            description: 最高评分,取值范围从0.0到5.0
+          price_min:
+            type: number
+            description: 最低价格
+          price_max:
+            type: number
+            description: 最高价格
+          businessHour:
+            type: array
+            description: 搜索目标地点的营业时间，每个元素的字符串格式例如07:00-19:00，多个时间段是列表中的多个元素。用户搜索24小时营业/全天营业时填入字符串00:00-24:00；搜索某时间点之前/后时填入字符串before-X:00/X:00-after，例如before-12:00/12:00-after分别表示12点前营业和12点后营业。禁止填入汉字。
+        required:
+        - reference
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: get_current_location
+      description: 获取车辆的当前位置，包含所在位置的地址名称、城市名、道路名和道路类型，get_current_location@N（N为数字变量）可以作为导航中其他API的索引。
+      parameters:
+        type: object
+        properties: {}
+        required: []
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: parkSpot_display
+      description: 显示停车位信息，用于展示停车位信息
+      parameters:
+        type: object
+        properties:
+          Reference:
+            type: array
+            description: 停车位引用标识列表，每个元素格式为 parkSpot@env#id，其中 id 为环境中的停车位索引编号
+            items:
+              type: string
+        required:
+        - Reference
+- class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  config:
+    type: native
+    use_real_car_format: true
+  tool_schema:
+    type: function
+    function:
+      name: calculate_distance
+      description: 计算两个地点A和B之间的距离和预计行驶时间
+      parameters:
+        type: object
+        properties:
+          startReference:
+            type: string
+            description: 起点的 POI 或子 POI 索引, 如果不填默认为本车位置
+          endReference:
+            type: string
+            description: 终点的 POI 或子 POI 索引
+        required:
+        - endReference
