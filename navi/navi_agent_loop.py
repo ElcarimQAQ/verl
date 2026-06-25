@@ -37,10 +37,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from navi.tool_rules import validate_tool_args
 from navi.utils import (
     check_navigation_completion,
-    is_valid_messages,
-    validate_tool_call,
+    is_valid_messages
 )
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
 from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
@@ -335,26 +335,31 @@ class NaviAgentLoop(ToolAgentLoop):
         if interaction is not None:
             await interaction.finalize_interaction(request_id)
 
-        # 构建输出
-        response_ids = agent_data.prompt_ids[-len(agent_data.response_mask):]
-        prompt_ids = agent_data.prompt_ids[:len(agent_data.prompt_ids) - len(agent_data.response_mask)]
-        multi_modal_data = {"image": agent_data.image_data} if agent_data.image_data is not None else {}
+        # 构建输出 — 使用第一个 _agent_data（deep copy）而非原始 agent_data，
+        # 因为 run_agent_data_loop 修改的是 deep copy 上的 tool_rewards / turn_scores /
+        # prompt_ids / response_mask / metrics 等字段，原始 agent_data 仍是首次生成后的快照。
+        primary = interaction_requests[0] if interaction_requests else agent_data
+        primary_sandbox = primary.extra_fields.get("sandbox", sandbox)
+
+        response_ids = primary.prompt_ids[-len(primary.response_mask):]
+        prompt_ids = primary.prompt_ids[:len(primary.prompt_ids) - len(primary.response_mask)]
+        multi_modal_data = {"image": primary.image_data} if primary.image_data is not None else {}
 
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[:self.response_length],
-            response_mask=agent_data.response_mask[:self.response_length],
+            response_mask=primary.response_mask[:self.response_length],
             multi_modal_data=multi_modal_data,
-            response_logprobs=agent_data.response_logprobs[:self.response_length]
-            if agent_data.response_logprobs
+            response_logprobs=primary.response_logprobs[:self.response_length]
+            if primary.response_logprobs
             else None,
-            num_turns=agent_data.user_turns + agent_data.assistant_turns + 1,
-            metrics=agent_data.metrics,
+            num_turns=primary.user_turns + primary.assistant_turns + 1,
+            metrics=primary.metrics,
             extra_fields={
-                "turn_scores": agent_data.turn_scores,
-                "tool_rewards": agent_data.tool_rewards,
+                "turn_scores": primary.turn_scores,
+                "tool_rewards": primary.tool_rewards,
                 "messages": {"messages": messages_lst},
-                "final_env_state": sandbox.export_state() if hasattr(sandbox, 'export_state') else {},
+                "final_env_state": primary_sandbox.export_state() if hasattr(primary_sandbox, 'export_state') else {},
             },
         )
         return output
@@ -559,10 +564,11 @@ class NaviAgentLoop(ToolAgentLoop):
             tool_args = {}
 
         # 验证工具调用
-        is_valid, reason = validate_tool_call(tool_name, tool_args, agent_data.messages)
-        if not is_valid:
-            logger.warning(f"[NaviAgent] Invalid tool call: {reason}")
-            return ToolResponse(text=f"Error: {reason}"), -0.5, {"error": reason}
+        # 1. tool_rules: 静态 schema / 业务硬规则 (合规→0, 违规→负分)
+        is_valid_rules, rules_reason = validate_tool_args(tool_name, tool_args)
+        if not is_valid_rules:
+            logger.warning(f"[NaviAgent] Tool rule violation: {rules_reason}")
+            return ToolResponse(text=f"Error: {rules_reason}"), -0.5, {"rule_violation": rules_reason}
 
         # wiki_search 等工具使用 MockSandboxExecutor（集成了 ToolMockEngine）
         # 其他工具使用真实 Sandbox
@@ -618,33 +624,25 @@ class NaviAgentLoop(ToolAgentLoop):
         is_completed: bool
     ) -> float:
         """
-        计算工具调用的奖励
+        计算工具调用的步骤级奖励
+
+        遵循 tool_rules.py 设计哲学: 合规→0, 违规→负分。
+        正分由任务完成 (is_completed) 在调用方给出。
 
         参考 agent_execution_engine_v2.py 中的 pre_judge_tool_return
         """
-        # 检查错误
+        # 检查执行错误 → 负分
         if isinstance(result, dict):
             error_code = result.get("errorCode")
             if error_code is not None and error_code not in [0, 200]:
                 return -0.5
-            if result.get("status") == "0":
+            # status "0" 表示成功，非 "0" 表示失败
+            status = result.get("status")
+            if status is not None and status != "0":
                 return -0.5
 
-        # 工具特定奖励
-        if tool_name == "poi_search":
-            if isinstance(result, dict) and "pois" in result:
-                reward = 0.1 * min(len(result.get("pois", [])), 5)
-            else:
-                reward = 0.0
-        elif tool_name == "navigation_start":
-            reward = 0.5
-        else:
-            reward = 0.1
-
-        if is_completed:
-            reward = max(reward, 1.0)
-
-        return reward
+        # 执行成功 → 0 分（合规不奖不罚，正分由任务完成给出）
+        return 0.0
 
     async def _handle_interacting_state(self, agent_data: AgentData) -> AgentState:
         """

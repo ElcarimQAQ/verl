@@ -2,7 +2,16 @@
 
 基于verl框架实现的导航Agent在线强化学习训练方案。
 
-## 最新更新 (2026-04-02)
+## 最新更新 (2026-06-25)
+
+### 奖励系统重构
+- **tool_rules 集成**: 将 `tool_rules.py` 的 `validate_tool_args` 集成到步骤级和回合级奖励计算
+- **单层校验**: 步骤级校验使用 tool_rules（`validate_tool_args`：静态 schema/业务硬规则），违规直接拦截
+- **奖励分离**: 遵循 "合规→0, 违规→负分" 设计，正分仅来自 GT 匹配和任务完成
+- **data_source='rule' 支持**: 修复 `NotImplementedError` 错误，navi 训练管线中的 rule 数据现在正确走 navi 奖励逻辑
+- **工具白名单统一**: `NAVI_TOOL_NAMES` 直接复用 `tool_rules.ALLOWED_APIS`，新增 `NEXT_PAGE`、`navigation_control` 等工具
+
+## 历史更新 (2026-04-02)
 
 ### 新增功能
 - **NPU 支持**: 新增 `train_rl_navi_npu.sh` 训练脚本，支持华为昇腾 NPU 设备
@@ -19,6 +28,8 @@
 
 ## 训练结果 (2026-04-01)
 
+> ⚠️ 以下为旧版正分奖励系统下的训练结果，当前版本已重构为 "合规→0, 违规→负分" 设计，数值会有差异。
+
 ### 训练摘要
 
 | 指标 | 初始值 | 最终值 | 变化 |
@@ -30,15 +41,17 @@
 
 ### 工具调用奖励分布
 
-| 工具 | 奖励范围 | 说明 |
-|------|----------|------|
-| `navigation_start` | 0.42 | 最高奖励，成功开始导航 |
-| `poi_search` | 0.34-0.40 | POI搜索成功 |
-| `notify_user_msg` | 0.14 | 用户播报 |
-| `wiki_search` | 0.08 | 百科搜索（使用LLM Mock） |
-| `navigation_pathPoint` | 0.04 | 途经点管理 |
-| `filter` | 0.04 | 结果筛选 |
-| 无工具调用 | -0.10 | 惩罚 |
+> ⚠️ 以下为旧版奖励系统的历史数据（正分基础奖励），当前版本已重构为 "合规→0, 违规→负分" 设计。
+
+| 工具 | 旧版奖励 | 当前设计 |
+|------|----------|----------|
+| `navigation_start` | 0.42 | 合规→0, 违规→-0.5, 任务完成→1.0 |
+| `poi_search` | 0.34-0.40 | 合规→0, 违规→-0.5, 执行错误→-0.5 |
+| `notify_user_msg` | 0.14 | 合规→0, 违规→-0.5, 任务完成→1.0 |
+| `wiki_search` | 0.08 | 合规→0, 违规→-0.5, 执行错误→-0.5 |
+| `navigation_pathPoint` | 0.04 | 合规→0, 违规→-0.5 |
+| `filter` | 0.04 | 合规→0, 违规→-0.5 |
+| 无工具调用 | -0.10 | -0.1 (过早终止) / -0.05 (无进展) |
 
 ### Checkpoint 位置
 
@@ -117,8 +130,9 @@ recipe/navi/
 ├── navi_agent_loop.py          # 导航Agent循环（核心）- 包含MockSandboxExecutor
 ├── navi_interaction.py         # 用户交互模拟器
 ├── tool_mock.py                # 工具Mock引擎（使用本地LLM生成响应）
+├── tool_rules.py               # 工具硬规则校验（schema/业务规则白名单）
 ├── navi_sandbox_tool.py        # 沙盒工具封装（SandboxExecutor → verl Tool）
-├── reward_function.py          # 奖励函数
+├── reward_function.py          # 回合级奖励函数（集成 tool_rules）
 ├── process_dataset.py          # 数据处理脚本
 ├── utils.py                    # 工具函数
 ├── train_rl_navi.sh            # Debug训练脚本 (4 GPU)
@@ -273,26 +287,68 @@ api_key: "sk-no-key-required"
 - 检测任务完成信号
 - 生成对话级别的交互数据
 
-### 5. NaviRewardManager (`reward_function.py`)
+### 5. ToolRules (`tool_rules.py`)
 
-奖励管理器，计算多个指标：
-- **accuracy**: 任务完成准确率
-- **step_validity**: 步骤有效性（工具调用是否正确）
-- **efficiency**: 效率（避免冗余调用）
+工具硬规则校验器，纯静态校验，不涉及 GT 比对或 sandbox 执行结果：
+
+```python
+# API 白名单 — 不在列表内的工具一律视为非法
+ALLOWED_APIS = {
+    "poi_search", "navigation_start", "notify_user_msg", "reject", "wiki_search",
+    "navigation_route", "NEXT_PAGE", "BACK_PAGE", "SELECT_PAGE", "SCROLL_PAGE",
+    "navigation_control", "navigation_mapZoom", "navigation_function_switch",
+    "navigation_broadCastMode_set", "navigation_info_query",
+    "navigation_roadcondition_query", "share_poi", "navigation_memory", "filter",
+}
+
+def validate_tool_args(tool_name, tool_args) -> Tuple[bool, str]:
+    """统一入口：API 白名单 + 该工具的细粒度硬规则"""
+    # 1. 白名单校验
+    # 2. 细粒度 schema 校验 (如 navigation_start 的 mode/routeType 规则)
+```
+
+**设计哲学**: 合规 → 0 分，违规 → 负分。正分奖励由 GT 匹配和任务完成单独计算。
+
+### 6. NaviRewardFunction (`reward_function.py`)
+
+回合级奖励函数，在整个 episode 结束后由 reward loop worker 调用：
+
+**两层评分架构**:
+- **第 1 层 — 规则校验** (`tool_rules.validate_tool_args`): 合规 → 0，违规 → -0.5
+- **第 2 层 — GT 匹配**: 名称匹配 + 参数匹配 → 正分
+
+**优先级**:
+1. 任务完成 → 高奖励 (0.8-1.0)
+2. 步骤级执行奖励 (`extra_info.tool_rewards`) → 中等奖励
+3. 自行解析 `solution_str` 做规则+GT匹配 → 兜底奖励
+4. 无工具调用 → 0 或负分
 
 ## 支持的工具
 
-| 工具名称 | 描述 | Mock方式 |
-|----------|------|----------|
-| `poi_search` | POI搜索 | 硬编码 |
-| `navigation_start` | 开始导航 | 硬编码 |
-| `navigation_route` | 路线查询 | 硬编码 |
-| `navigation_info_query` | 导航信息查询 | 硬编码 |
-| `navigation_memory` | 记忆管理 | 硬编码 |
-| `navigation_pathPoint` | 途经点管理 | 硬编码 |
-| `filter` | 结果筛选 | 硬编码 |
-| `notify_user_msg` | 用户播报 | 硬编码 |
-| `wiki_search` | 百科搜索 | **LLM Mock** |
+完整工具白名单定义在 `tool_rules.py` 的 `ALLOWED_APIS` 中：
+
+| 工具名称 | 描述 | Mock方式 | 有细粒度规则 |
+|----------|------|----------|:------------:|
+| `poi_search` | POI搜索 | 硬编码 | ✅ |
+| `navigation_start` | 开始导航 | 硬编码 | ✅ |
+| `navigation_route` | 路线查询 | 硬编码 | ✅ |
+| `navigation_info_query` | 导航信息查询 | 硬编码 | — |
+| `navigation_memory` | 记忆管理 | 硬编码 | — |
+| `navigation_pathPoint` | 途经点管理 | 硬编码 | — |
+| `filter` | 结果筛选 | 硬编码 | ✅ |
+| `notify_user_msg` | 用户播报 | 硬编码 | ✅ |
+| `wiki_search` | 百科搜索 | **LLM Mock** | ✅ |
+| `reject` | 拒绝请求 | 硬编码 | — |
+| `NEXT_PAGE` | 下一页 | 硬编码 | — |
+| `BACK_PAGE` | 上一页 | 硬编码 | — |
+| `SELECT_PAGE` | 选择页 | 硬编码 | — |
+| `SCROLL_PAGE` | 滚动页 | 硬编码 | — |
+| `navigation_control` | 导航控制 | 硬编码 | — |
+| `navigation_mapZoom` | 地图缩放 | 硬编码 | — |
+| `navigation_function_switch` | 功能切换 | 硬编码 | — |
+| `navigation_broadCastMode_set` | 播报模式设置 | 硬编码 | — |
+| `navigation_roadcondition_query` | 路况查询 | 硬编码 | — |
+| `share_poi` | 分享POI | 硬编码 | — |
 
 ## 使用方法
 
@@ -353,7 +409,7 @@ pip install -e /path/to/deepthink-agent
 
 ```yaml
 - name: navi_agent
-  _target_: navi.navi_agent_loop.NaviAgentLoop
+  _target_: recipe.navi.navi_agent_loop.NaviAgentLoop
 ```
 
 ### 工具配置 (`config/navi_tool_config.yaml`)
@@ -362,7 +418,7 @@ pip install -e /path/to/deepthink-agent
 
 ```yaml
 tools:
-  - class_name: navi.navi_sandbox_tool.NaviSandboxTool
+  - class_name: recipe.navi.navi_sandbox_tool.NaviSandboxTool
     config:
       type: native
       use_real_car_format: true
@@ -392,7 +448,7 @@ tools:
 ```yaml
 interaction:
   - name: "navi"
-    class_name: "navi.navi_interaction.NaviInteraction"
+    class_name: "recipe.navi.navi_interaction.NaviInteraction"
     config: {
       "user_model": "openai/Qwen3-235B-A22B-Thinking-2507-FP8",
       "api_base": "http://localhost:12200/v1",
@@ -406,38 +462,68 @@ interaction:
 
 ## 奖励计算
 
-### 步骤级别奖励
+奖励系统分为**步骤级**和**回合级**两层，步骤级信号通过 `extra_info` 传递给回合级。
 
+### 步骤级别奖励 (`navi_agent_loop.py`)
+
+在每步工具执行后立即计算，写入 `agent_data.tool_rewards[]` 和 `agent_data.turn_scores[]`：
+
+**规则校验**（在 `_execute_tool_with_sandbox` 中）:
+1. **tool_rules 校验** (`validate_tool_args`): 静态 schema/业务硬规则，违规 → -0.5，提前返回
+
+**执行结果奖励** (`_calculate_tool_reward`):
 ```python
-def _calculate_tool_reward(tool_name, result, args, is_completed):
-    # 检查工具返回有效性
-    if "errorCode" in result and result["errorCode"] not in [0, 200]:
-        return -0.5
+# 遵循 tool_rules.py 设计哲学: 合规→0, 违规→负分
+# 正分由任务完成 (is_completed) 在调用方给出
+if isinstance(result, dict):
+    if errorCode not in [0, 200]:  return -0.5   # 执行错误
+    if status != "0":              return -0.5   # status "0" 表示成功
+# 执行成功 → 0 分（合规不奖不罚）
+return 0.0
 
-    # 工具特定奖励
-    if tool_name == "poi_search":
-        return 0.1 * len(result.get("pois", []))
-    elif tool_name == "navigation_start":
-        return 0.5
-    elif tool_name == "notify_user_msg":
-        return 0.1
-
-    # 任务完成奖励
-    if is_completed:
-        return 1.0
-
-    return 0.1
+# 调用方: is_completed 时覆盖为 1.0
+if is_completed:
+    tool_reward = 1.0
 ```
 
-### 对话级别奖励
+### 回合级别奖励 (`reward_function.py`)
 
+在整个 episode 结束后由 reward loop worker 调用，直接用于策略梯度更新：
+
+**优先级**:
+1. **任务完成** → 高奖励 (0.8-1.0)
+2. **步骤级执行奖励** (`_aggregate_tool_rewards(extra_info)`) → 复用步骤级信号
+3. **自行解析** (规则校验 + GT 匹配) → 兜底计算
+4. **无工具调用** → 0 或负分 (-0.1 过早终止, -0.05 长时间无进展)
+
+**两层评分** (兜底计算时):
 ```python
-# 多指标加权组合
-total_reward = (
-    accuracy_score * accuracy_weight +
-    step_validity_score * step_validity_weight +
-    efficiency_score * efficiency_weight
-)
+# 第 1 层: 规则校验 (tool_rules.validate_tool_args)
+#   合规 → 0, 违规 → -0.5
+total_rule_penalty += _rule_penalty(tool_name, is_valid, reason)
+
+# 第 2 层: GT 匹配 (正分)
+#   名称匹配 * 0.3 + 参数匹配 * 0.3
+total_gt_reward += best_match_score
+
+# 聚合
+score = total_rule_penalty / n + total_gt_reward / n
+```
+
+### 数据流
+
+```
+每步工具调用
+  ├─ validate_tool_args() → 违规: -0.5, 提前返回 (不执行沙盒)
+  └─ _calculate_tool_reward() → 0.0 (成功) / -0.5 (执行错误)
+       └─ is_completed 时覆盖为 1.0
+       └─ 写入 tool_rewards[], turn_scores[]
+                                     ↓ (存入 extra_info)
+整个 episode 结束
+  └─ compute_score()
+       ├─ 优先: _aggregate_tool_rewards(extra_info)  ← 复用步骤级奖励
+       ├─ 其次: _check_task_completion(extra_info)    ← 复用步骤级完成状态
+       └─ 兜底: validate_tool_args + GT匹配           ← 无执行奖励时
 ```
 
 ## 导航任务完成信号
@@ -454,10 +540,11 @@ total_reward = (
 | `SandboxExecutor` | `NaviSandboxTool` + 直接调用 |
 | `NaviTrajectoryData` | `NaviTrajectoryState` |
 | `execute_tool_async` | `_execute_with_sandbox` |
-| `pre_judge_tool_return` | `_calculate_tool_reward` |
+| `pre_judge_tool_return` | `_calculate_tool_reward` + `validate_tool_args` |
 | `check_task_completion` | `check_navigation_completion` |
 | `UserMockEngine` | `NaviInteraction` |
 | `ToolMockEngine` | `tool_mock.ToolMockEngine` (集成到 MockSandboxExecutor) |
+| — | `tool_rules.validate_tool_args` (新增: 静态硬规则校验) |
 
 ## 训练日志示例
 
@@ -469,10 +556,19 @@ Training Progress:  49%|████▉     | 81/166 [52:41<36:37, 25.85s/it]
 
 ### 奖励计算日志
 
+> 以下为当前 "合规→0, 违规→负分" 设计下的日志示例
+
 ```
-Navi reward: score=0.42, turns=2, tools=['navigation_start'], num_tools=1
-Navi reward: score=0.40, turns=2, tools=['poi_search'], num_tools=1
-Navi reward: score=0.14, turns=2, tools=['notify_user_msg'], num_tools=1
+# 任务完成 → 正分
+Navi reward: score=1.0, turns=3, tools=['poi_search', 'navigation_start', 'notify_user_msg'], num_tools=3
+
+# 合规执行但未完成 → 0 分
+Navi reward: score=0.0, turns=2, tools=['poi_search'], num_tools=1
+
+# 规则违规 → 负分
+Navi reward: score=-0.5, turns=1, tools=['navigation_start'], num_tools=1  (rule violation: mode必填)
+
+# 无工具调用 → 负分
 Navi reward: score=-0.10 (no tools), turns=2
 ```
 
@@ -503,6 +599,8 @@ Navi reward: score=-0.10 (no tools), turns=2
 ```
 
 ### Step指标输出
+
+> 以下为旧版奖励系统下的指标输出示例
 
 ```
 step:166 - actor/entropy:0.76 - critic/score/mean:0.30 - critic/score/max:0.40
