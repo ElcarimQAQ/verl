@@ -194,7 +194,7 @@ class TestToolCallThenTerminate(NaviAgentLoopTestCase):
     def test_tool_call_then_plain_terminate(self):
         tokenizer = FakeTokenizer()
         replies = [
-            _tool_call_text("poi_search", {"keyword": "咖啡"}),
+            _tool_call_text("poi_search", {"mode": "关键词", "keyword": "咖啡"}),
             "好的，已经为您找到附近的咖啡馆。",
         ]
         server_manager = FakeServerManager(tokenizer, replies)
