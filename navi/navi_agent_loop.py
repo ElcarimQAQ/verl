@@ -449,7 +449,8 @@ class NaviAgentLoop(ToolAgentLoop):
 
                 # 检查任务完成 - 使用 check_navigation_completion 的结果 + sandbox 状态验证
                 is_completed = extra_info.get("completed", False)
-                if is_completed and self._verify_task_completion(sandbox, tool_args):
+                initial_env = agent_data.extra_fields.get("env_info")
+                if is_completed and self._verify_task_completion(sandbox, tool_args, initial_env):
                     logger.info(f"[NaviAgent] Task completed (verified): msg={tool_args.get('msg', '')[:50]}")
                     agent_data.turn_scores.append(1.0)
                     return AgentState.TERMINATED
@@ -497,6 +498,43 @@ class NaviAgentLoop(ToolAgentLoop):
             return AgentState.INTERACTING
 
         return AgentState.GENERATING
+
+    @staticmethod
+    def _verify_task_completion(sandbox, tool_args: Dict, initial_env: Optional[Dict] = None) -> bool:
+        """用 sandbox 的真实状态核实 notify_user_msg 宣称的完成情况，避免模型仅凭播报文本就拿满分。
+
+        ``check_navigation_completion`` 只看 ``msg`` 文本是否命中关键词，模型完全可能在没有真正
+        调用 navigation_start / navigation_route 的情况下空播报"已为您规划路线"。这里用
+        ``SandboxExecutor.get_state_diff(initial_env, current_state)`` 核实环境状态确实发生了
+        对应的变化：
+
+        - 播报"开始导航"类信号 -> 要求 ``diff.entered_navigation`` 为真
+        - 播报"导航结束"类信号 -> 要求当前已不在导航态（``exited_navigation`` 或本来就没进入过）
+        - 其余情况（如播报内容为空）-> 没有更细的状态信号可核实，沿用文本判断结果
+
+        没有真实 SandboxExecutor（如测试/本地用的 MockSandboxExecutor，没有 ``get_state_diff``）
+        或拿不到初始环境快照时，没有更可靠的真相来源，直接信任文本判断结果。
+        """
+        get_state_diff = getattr(sandbox, "get_state_diff", None) or getattr(type(sandbox), "get_state_diff", None)
+        if get_state_diff is None or initial_env is None or not hasattr(sandbox, "export_state"):
+            return True
+
+        try:
+            current_state = sandbox.export_state()
+            diff = get_state_diff(initial_env, current_state)
+        except Exception as e:
+            logger.warning(f"[NaviAgent] _verify_task_completion: get_state_diff failed: {e}")
+            return True
+
+        msg = tool_args.get("msg", "")
+        start_signals = ["开始导航", "已为您规划", "导航已启动", "正在为您导航", "已为您导航"]
+        end_signals = ["导航结束", "已到达", "任务完成", "导航已完成", "祝您"]
+
+        if any(signal in msg for signal in start_signals):
+            return bool(diff.entered_navigation)
+        if any(signal in msg for signal in end_signals):
+            return bool(diff.exited_navigation) or not diff.entered_navigation
+        return True
 
     async def _execute_tool_with_sandbox(
         self,
