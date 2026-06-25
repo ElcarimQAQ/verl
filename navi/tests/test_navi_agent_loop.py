@@ -166,8 +166,9 @@ class NaviAgentLoopTestCase(unittest.TestCase):
 
     def _build_loop(self, tokenizer: FakeTokenizer, server_manager, num_repeat_rollouts: int = 1) -> NaviAgentLoop:
         from verl.utils.dataset.rl_dataset import RLHFDataset
+        from navi.navi_agent_loop import MockSandboxExecutor
 
-        return NaviAgentLoop(
+        agent_loop = NaviAgentLoop(
             trainer_config=_make_trainer_config(num_repeat_rollouts),
             server_manager=server_manager,
             tokenizer=tokenizer,
@@ -176,6 +177,11 @@ class NaviAgentLoopTestCase(unittest.TestCase):
             data_config=_make_data_config(),
             agent={},
         )
+        # 强制使用 MockSandboxExecutor：如果 navi_lab.sandbox.core2 在当前环境可导入
+        # （比如在真实训练机器上跑这些单测），__init__ 会优先选用真实 SandboxExecutor，
+        # 这些单测就会变成悄悄发起真实网络请求的集成测试，结果随环境漂移。
+        agent_loop._sandbox_executor_cls = MockSandboxExecutor
+        return agent_loop
 
     @staticmethod
     def _run(coro):
