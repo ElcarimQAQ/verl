@@ -43,7 +43,8 @@ from navi.utils import (
     validate_tool_call,
 )
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
-from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
+from verl.experimental.agent_loop.tool_agent_loop import ToolAgentLoop
+from navi.agent_schemas import AgentData, AgentState
 from navi.interaction_base import BaseInteraction
 from verl.tools.schemas import ToolResponse
 from verl.utils.rollout_trace import rollout_trace_op
