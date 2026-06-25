@@ -44,7 +44,7 @@ from navi.utils import (
 )
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
 from verl.experimental.agent_loop.tool_agent_loop import AgentData, AgentState, ToolAgentLoop
-from verl.interactions.base import BaseInteraction
+from navi.interaction_base import BaseInteraction
 from verl.tools.schemas import ToolResponse
 from verl.utils.rollout_trace import rollout_trace_op
 from verl.workers.rollout.schemas import Message
@@ -129,6 +129,18 @@ class NaviAgentLoop(ToolAgentLoop):
         if system_template:
             self.system_prompt = self.tokenizer.encode(system_template, add_special_tokens=False)
             logger.info(f"[NaviAgent] Loaded system_template from config, length={len(self.system_prompt)} tokens")
+
+        # 初始化用户模拟器交互（vendored，替代已被移除的 verl.interactions）
+        # interaction 配置路径来自 agent.yaml 的 agent.interaction_config_path
+        self.interaction_config_file = agent_config.get('interaction_config_path', None)
+        self.interaction_map = {}
+        if self.interaction_config_file:
+            from navi.interaction_registry import initialize_interactions_from_config
+            self.interaction_map = initialize_interactions_from_config(self.interaction_config_file)
+            logger.info(
+                f"[NaviAgent] Loaded {len(self.interaction_map)} interaction(s) from "
+                f"{self.interaction_config_file}: {list(self.interaction_map.keys())}"
+            )
 
         # 线程池用于同步沙盒调用
         self._executor = ThreadPoolExecutor(max_workers=10)

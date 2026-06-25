@@ -28,7 +28,7 @@ from uuid import uuid4
 
 import litellm
 
-from verl.interactions.base import BaseInteraction
+from navi.interaction_base import BaseInteraction
 from verl.utils.rollout_trace import rollout_trace_op
 
 logger = logging.getLogger('NaviInteraction')
