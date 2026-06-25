@@ -818,41 +818,43 @@ class MockSandboxExecutor:
             ]
         },
         "navigation_start": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "导航开始",
             "route": {"distance": "5000", "duration": "600"}
         },
         "notify_user_msg": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "消息已播报",
             "msg": args.get("msg", "")
         },
         "navigation_route": lambda args: {
-            "status": "1",
+            "status": "0",
             "distance": "5000",
             "duration": "600",
             "info": "路线查询成功"
         },
         "navigation_info_query": lambda args: {
-            "status": "1",
+            "status": "0",
             "distance": "5公里",
             "duration": "10分钟",
             "info": "查询成功"
         },
         "navigation_memory": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "记忆操作成功"
         },
         "filter": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "筛选成功"
         },
         "wiki_search": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": f"关于'{args.get('query', '')}'的百科信息",
             "summary": "这是一个示例百科搜索结果（fallback）"
         },
     }
+    # 注意：真实 sandbox 用 status="0" 表示成功（见 _calculate_tool_reward 的
+    # `status != "0" -> -0.5` 判定）。mock 必须对齐，否则成功工具会被误判为失败。
 
     def __init__(self, initial_env, initial_history, initial_history_detail,
                  use_real_car_format=True, use_llm_mock=False):
@@ -890,7 +892,7 @@ class MockSandboxExecutor:
         handler = self._MOCK_RESPONSES.get(tool_name)
         if handler:
             return handler(args)
-        return {"status": "1", "info": f"Mock执行 {tool_name}"}
+        return {"status": "0", "info": f"Mock执行 {tool_name}"}
 
     def export_state(self):
         return copy_module.deepcopy(self.env_state)
