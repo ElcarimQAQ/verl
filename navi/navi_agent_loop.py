@@ -438,6 +438,8 @@ class NaviAgentLoop(ToolAgentLoop):
 
         # 标记是否有 notify_user_msg 工具调用
         has_notify_user_msg = False
+        # 标记非 notify 工具是否直接完成了任务（如 navigation_start 成功即完成）
+        completed_via_tool = False
 
         # 处理工具响应
         for (tool_response, tool_reward, extra_info), tool_info in zip(responses, tool_calls_info):
@@ -469,6 +471,14 @@ class NaviAgentLoop(ToolAgentLoop):
             if tool_reward is not None:
                 agent_data.tool_rewards.append(tool_reward)
 
+            # 非 notify 工具也可能直接完成任务（如 navigation_start 成功）。
+            # 完成的正分走 turn_scores，不塞进 tool_rewards。
+            if not completed_via_tool and extra_info.get("completed", False):
+                initial_env = agent_data.extra_fields.get("env_info")
+                if self._verify_task_completion(sandbox, tool_args, initial_env):
+                    completed_via_tool = True
+                    logger.info(f"[NaviAgent] Task completed via {tool_name} (verified)")
+
             response_text = tool_response.text or ""
             logger.debug(f"[NaviAgent] Tool {tool_name}: reward={tool_reward}, response_len={len(response_text)}")
 
@@ -489,6 +499,8 @@ class NaviAgentLoop(ToolAgentLoop):
         )
 
         if len(agent_data.response_mask) + len(response_ids) >= self.response_length:
+            if completed_via_tool:
+                agent_data.turn_scores.append(1.0)
             return AgentState.TERMINATED
 
         agent_data.prompt_ids += response_ids
@@ -496,6 +508,11 @@ class NaviAgentLoop(ToolAgentLoop):
         if agent_data.response_logprobs:
             agent_data.response_logprobs += [0.0] * len(response_ids)
         agent_data.user_turns += 1
+
+        # 非 notify 工具完成任务：写入 turn_scores 并终止（优先于继续生成/交互）
+        if completed_via_tool:
+            agent_data.turn_scores.append(1.0)
+            return AgentState.TERMINATED
 
         # 如果同时有 notify_user_msg 和其他工具，进入 INTERACTING 状态
         if has_notify_user_msg and agent_data.interaction is not None:
@@ -600,13 +617,13 @@ class NaviAgentLoop(ToolAgentLoop):
             else:
                 result_str = str(result)
 
-            # 计算奖励
+            # 计算步骤级奖励：只反映"这次调用本身合不合规/有没有执行错误"。
+            # 任务完成的正分不在这里给，改由调用方写入 turn_scores（见 _handle_processing_tools_state）。
             is_completed, completion_reason = check_navigation_completion(tool_name, result_str, tool_args)
-            tool_reward = self._calculate_tool_reward(tool_name, result, tool_args, is_completed)
+            tool_reward = self._calculate_tool_reward(tool_name, result, tool_args)
 
             if is_completed:
                 logger.info(f"[NaviAgent] Navigation completed: {completion_reason}")
-                tool_reward = 1.0
 
             logger.debug(f"[NaviAgent] Sandbox result: reward={tool_reward}, result_len={len(result_str)}")
 
@@ -621,13 +638,12 @@ class NaviAgentLoop(ToolAgentLoop):
         tool_name: str,
         result: Any,
         args: Dict,
-        is_completed: bool
     ) -> float:
         """
         计算工具调用的步骤级奖励
 
         遵循 tool_rules.py 设计哲学: 合规→0, 违规→负分。
-        正分由任务完成 (is_completed) 在调用方给出。
+        任务完成的正分不在这里给，由调用方写入 turn_scores。
 
         参考 agent_execution_engine_v2.py 中的 pre_judge_tool_return
         """
@@ -802,41 +818,43 @@ class MockSandboxExecutor:
             ]
         },
         "navigation_start": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "导航开始",
             "route": {"distance": "5000", "duration": "600"}
         },
         "notify_user_msg": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "消息已播报",
             "msg": args.get("msg", "")
         },
         "navigation_route": lambda args: {
-            "status": "1",
+            "status": "0",
             "distance": "5000",
             "duration": "600",
             "info": "路线查询成功"
         },
         "navigation_info_query": lambda args: {
-            "status": "1",
+            "status": "0",
             "distance": "5公里",
             "duration": "10分钟",
             "info": "查询成功"
         },
         "navigation_memory": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "记忆操作成功"
         },
         "filter": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": "筛选成功"
         },
         "wiki_search": lambda args: {
-            "status": "1",
+            "status": "0",
             "info": f"关于'{args.get('query', '')}'的百科信息",
             "summary": "这是一个示例百科搜索结果（fallback）"
         },
     }
+    # 注意：真实 sandbox 用 status="0" 表示成功（见 _calculate_tool_reward 的
+    # `status != "0" -> -0.5` 判定）。mock 必须对齐，否则成功工具会被误判为失败。
 
     def __init__(self, initial_env, initial_history, initial_history_detail,
                  use_real_car_format=True, use_llm_mock=False):
@@ -874,7 +892,7 @@ class MockSandboxExecutor:
         handler = self._MOCK_RESPONSES.get(tool_name)
         if handler:
             return handler(args)
-        return {"status": "1", "info": f"Mock执行 {tool_name}"}
+        return {"status": "0", "info": f"Mock执行 {tool_name}"}
 
     def export_state(self):
         return copy_module.deepcopy(self.env_state)

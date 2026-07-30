@@ -474,16 +474,15 @@ interaction:
 **执行结果奖励** (`_calculate_tool_reward`):
 ```python
 # 遵循 tool_rules.py 设计哲学: 合规→0, 违规→负分
-# 正分由任务完成 (is_completed) 在调用方给出
+# 任务完成的正分不在这里给，由调用方写入 turn_scores
 if isinstance(result, dict):
     if errorCode not in [0, 200]:  return -0.5   # 执行错误
     if status != "0":              return -0.5   # status "0" 表示成功
 # 执行成功 → 0 分（合规不奖不罚）
 return 0.0
 
-# 调用方: is_completed 时覆盖为 1.0
-if is_completed:
-    tool_reward = 1.0
+# 任务完成（含非 notify 工具直接完成，经 _verify_task_completion 核实）→
+#   turn_scores.append(1.0)，不再覆盖 tool_rewards
 ```
 
 ### 回合级别奖励 (`reward_function.py`)
@@ -515,9 +514,8 @@ score = total_rule_penalty / n + total_gt_reward / n
 ```
 每步工具调用
   ├─ validate_tool_args() → 违规: -0.5, 提前返回 (不执行沙盒)
-  └─ _calculate_tool_reward() → 0.0 (成功) / -0.5 (执行错误)
-       └─ is_completed 时覆盖为 1.0
-       └─ 写入 tool_rewards[], turn_scores[]
+  └─ _calculate_tool_reward() → 0.0 (成功) / -0.5 (执行错误) → 写入 tool_rewards[]
+       └─ 任务完成 (经 _verify_task_completion 核实) → 写入 turn_scores[] (1.0)，不进 tool_rewards
                                      ↓ (存入 extra_info)
 整个 episode 结束
   └─ compute_score()

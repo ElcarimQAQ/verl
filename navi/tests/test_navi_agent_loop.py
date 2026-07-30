@@ -208,8 +208,46 @@ class TestToolCallThenTerminate(NaviAgentLoopTestCase):
         )
 
         self.assertEqual(server_manager.call_count, 2)
-        self.assertEqual(len(output.extra_fields["tool_rewards"]), 1)
-        self.assertGreater(output.extra_fields["tool_rewards"][0], 0)
+        # poi_search 成功但不构成"完成"：per-step 合规奖励为 0（不奖不罚）
+        self.assertEqual(output.extra_fields["tool_rewards"], [0.0])
+        # 没有任务完成 -> turn_scores 不应出现完成的 1.0
+        self.assertNotIn(1.0, output.extra_fields["turn_scores"])
+
+
+class TestNonNotifyToolCompletion(NaviAgentLoopTestCase):
+    """非 notify 工具直接完成任务（结果命中"已到达目的地"信号）-> 完成奖励走
+    turn_scores，不进 tool_rewards，且立即终止。"""
+
+    def test_completion_routes_to_turn_scores(self):
+        from navi.navi_agent_loop import MockSandboxExecutor
+
+        class CompletingSandbox(MockSandboxExecutor):
+            # 让任意工具的执行结果命中 check_navigation_completion 的"已到达目的地"信号
+            def execute(self, call):
+                return {"status": "0", "info": "已到达目的地"}
+
+        tokenizer = FakeTokenizer()
+        replies = [
+            _tool_call_text("navigation_start", {"mode": "导航", "desLocationReference": "目的地"}),
+        ]
+        server_manager = FakeServerManager(tokenizer, replies)
+        agent_loop = self._build_loop(tokenizer, server_manager)
+        agent_loop._sandbox_executor_cls = CompletingSandbox
+
+        output = self._run(
+            agent_loop.run(
+                sampling_params={},
+                raw_prompt=[{"role": "user", "content": "带我去目的地"}],
+            )
+        )
+
+        # 工具调用后任务即完成并终止，只生成一次
+        self.assertEqual(server_manager.call_count, 1)
+        # 完成奖励写入 turn_scores
+        self.assertIn(1.0, output.extra_fields["turn_scores"])
+        # per-step tool_rewards 只反映合规性（成功 -> 0.0），绝不含完成的 1.0
+        self.assertNotIn(1.0, output.extra_fields["tool_rewards"])
+        self.assertTrue(all(r <= 0.0 for r in output.extra_fields["tool_rewards"]))
 
 
 class TestNotifyUserMsgTriggersInteraction(NaviAgentLoopTestCase):
