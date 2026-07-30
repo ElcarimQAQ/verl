@@ -19,7 +19,9 @@ Navigation Interaction Module for user simulation.
 
 import asyncio
 import copy
+import json
 import logging
+import math
 import os
 import re
 from typing import Any, Optional
@@ -28,16 +30,94 @@ from uuid import uuid4
 import litellm
 
 from navi.interaction_base import BaseInteraction
+from navi.tool_rules import NOTIFY_TOOLS, USER_VISIBLE_TOOL_RESULTS
 from navi.utils import extract_json
 from verl.utils.rollout_trace import rollout_trace_op
 
-logger = logging.getLogger('NaviInteraction')
+logger = logging.getLogger("NaviInteraction")
 # 默认设置为 INFO 级别，确保 start_interaction 等关键日志能够输出
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 # 终止信号
 TERMINATION_SIGNAL = "[[TERMINATE CHAT]]"
+
+_REQUIRED_RESPONSE_KEYS = {"current_status", "thought", "response"}
+_SATISFACTION_KEY = "satisfaction"
+_META_HINTS = ("```", "<|", "|>", "current_status", '"thought"', '"response"')
+_TRANSIENT_MSG_HINTS = (
+    "connection error",
+    "connection reset",
+    "timeout",
+    "timed out",
+    "service unavailable",
+    "overloaded",
+    "502",
+    "503",
+    "504",
+    "temporarily unavailable",
+)
+_FALLBACK_FOLLOWUPS = (
+    "还有别的方案吗？",
+    "再帮我看看附近还有什么。",
+    "继续吧。",
+    "还有多远？",
+    "麻烦再确认一下。",
+    "好的，下一步呢？",
+)
+
+
+def _safe_satisfaction(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return 1.0 if number > 0 else 0.0
+
+
+def _looks_like_meta(text: str) -> bool:
+    return len(text) > 80 or any(hint.lower() in text.lower() for hint in _META_HINTS)
+
+
+def _is_transient_error(error: Exception) -> bool:
+    if type(error).__name__ in {
+        "RateLimitError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "Timeout",
+        "ServiceUnavailableError",
+    }:
+        return True
+    message = str(error).lower()
+    return any(hint in message for hint in _TRANSIENT_MSG_HINTS)
+
+
+def _extract_response_json(text: str) -> Optional[dict[str, Any]]:
+    """Return the last complete response object, ignoring quoted GT JSON."""
+    try:
+        result = extract_json(text)
+        if isinstance(result, dict) and _REQUIRED_RESPONSE_KEYS <= result.keys():
+            return result
+    except Exception:
+        pass
+
+    decoder = json.JSONDecoder()
+    candidates = []
+    for match in re.finditer(r"\{", text):
+        try:
+            result, _ = decoder.raw_decode(text[match.start() :])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(result, dict) and _REQUIRED_RESPONSE_KEYS <= result.keys():
+            candidates.append(result)
+    return candidates[-1] if candidates else None
+
 
 # 用户模拟Prompt模板
 USER_PROMPT_TEMPLATE = """你是一名车载导航系统的用户，正在与AI助手交互完成导航任务。你的目标是生成真实、自然的用户回复。
@@ -90,74 +170,81 @@ USER_PROMPT_TEMPLATE = """你是一名车载导航系统的用户，正在与AI�
 
 
 class NaviInteraction(BaseInteraction):
-    """
-    导航系统的用户交互模拟器
-
-    主要功能：
-    - `start_interaction`: 启动一个交互实例
-    - `generate_response`: 生成用户回复
-    - `finalize_interaction`: 结束交互实例
-    """
+    """Navigation user simulator used by the asynchronous agent loop."""
 
     def __init__(self, config: dict):
         super().__init__(config)
-        _config = copy.deepcopy(config)
-
-        _config.pop("enable_log", None)
-
-        self.name = _config.pop("name", "navi")
-        self.user_model = _config.pop("user_model")
-
-        self.termination_signal = _config.pop("termination_signal", TERMINATION_SIGNAL)
-        self.num_retries = _config.pop("num_retries", 3)
-
-        self.user_model_kwargs = _config
-
-        self._instance_dict = {}
+        model_config = copy.deepcopy(config)
+        model_config.pop("enable_log", None)
+        self.name = model_config.pop("name", "navi")
+        self.user_model = model_config.pop("user_model")
+        self.termination_signal = model_config.pop("termination_signal", TERMINATION_SIGNAL)
+        self.num_retries = int(model_config.pop("num_retries", 3))
+        if "max_tokens" in model_config:
+            model_config["max_tokens"] = int(model_config["max_tokens"])
+        if "temperature" in model_config:
+            model_config["temperature"] = float(model_config["temperature"])
+        extra_body = model_config.get("extra_body")
+        if isinstance(extra_body, dict):
+            template_kwargs = extra_body.get("chat_template_kwargs")
+            if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
+                template_kwargs["enable_thinking"] = str(template_kwargs["enable_thinking"]).lower() == "true"
+        self.user_model_kwargs = model_config
+        self._instance_dict: dict[str, dict[str, Any]] = {}
 
     async def start_interaction(
-        self, instance_id: Optional[str] = None, ground_truth: Optional[str] = None, **kwargs
+        self, instance_id: Optional[str] = None, ground_truth: Optional[dict[str, Any] | str] = None, **kwargs
     ) -> str:
-        """启动交互实例"""
-        logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
-        logger.info(f"[NaviInteraction] start_interaction called with instance_id={instance_id}, kwargs={kwargs}")
-        
         if instance_id is None:
             instance_id = str(uuid4())
         assert "single_turn_prompt" in kwargs, "single_turn_prompt is required in interaction_kwargs"
         self._instance_dict[instance_id] = {
             "response": "",
             "ground_truth": ground_truth,
-            "reward": 0.0,
             "interaction_kwargs": kwargs,
+            "fallback_count": 0,
         }
-        logger.info(f"[NaviInteraction] start_interaction completed, instance_id={instance_id}, interaction_kwargs={kwargs}")
         return instance_id
 
     @rollout_trace_op
     async def generate_response(
-        self, instance_id: str, messages: list[dict[str, Any]], **kwargs
+        self, instance_id: str, messages: list[dict[str, Any] | str], **kwargs
     ) -> tuple[bool, str, float, dict]:
-        """生成用户回复"""
-        assert messages[-1]["role"] in ["system", "assistant"], (
-            "最后一条消息必须来自system或assistant"
-        )
+        last_message = messages[-1] if messages else None
+        if isinstance(last_message, dict):
+            assert last_message.get("role") in {"system", "assistant"}, "最后一条消息必须来自system或assistant"
+        else:
+            assert last_message is not None, "messages 不能为空"
 
-        interaction_kwargs = self._instance_dict[instance_id]["interaction_kwargs"]
-        ground_truth = self._instance_dict[instance_id].get("ground_truth")
-        chat_history = self._parse_messages(messages, strip_sys_prompt=True)
+        state = self._instance_dict[instance_id]
+        interaction_kwargs = state["interaction_kwargs"]
+        ground_truth = state.get("ground_truth")
+        if isinstance(ground_truth, (dict, list)):
+            ground_truth_text = json.dumps(ground_truth, ensure_ascii=False, indent=2)
+        else:
+            ground_truth_text = ground_truth or "（未提供，以参考目标为准）"
+        env_diff_summary = kwargs.get("env_diff_summary") or "（无环境状态变化信息）"
+        env_state_text = kwargs.get("env_state_text") or "（无当前环境状态信息）"
         prompt = USER_PROMPT_TEMPLATE.format(
             task_desc=interaction_kwargs.get("task_desc", "车载导航任务"),
             single_turn_prompt=interaction_kwargs["single_turn_prompt"],
-            ground_truth=ground_truth or "（未提供，以参考目标为准）",
-            chat_history=chat_history,
+            ground_truth=ground_truth_text,
+            chat_history=self._parse_messages(messages, strip_sys_prompt=True),
             termination_signal=self.termination_signal,
+        )
+        prompt += (
+            "\n\n<|环境状态差分开始（AI不可见）|>\n"
+            f"{env_diff_summary}\n<|环境状态差分结束|>\n"
+            "<|当前环境状态开始（AI不可见）|>\n"
+            f"{env_state_text}\n<|当前环境状态结束|>\n"
+            "请在输出 JSON 中额外给出 satisfaction（0 或 1）；只有工具真实执行且满足 ground_truth 才能为 1。"
         )
 
         response = ""
-        for i in range(self.num_retries):
+        satisfaction = None
+        for attempt in range(self.num_retries):
             try:
-                full_response = (
+                message = (
                     (
                         await litellm.acompletion(
                             model=self.user_model,
@@ -166,80 +253,160 @@ class NaviInteraction(BaseInteraction):
                         )
                     )
                     .choices[0]
-                    .message.content
+                    .message
                 )
-            except litellm.RateLimitError as e:
-                logger.warning(f"[NaviInteraction] RateLimitError: {e}. Retrying...")
-                await asyncio.sleep(max(2**i, 60))
-                continue
-            except Exception as e:
-                logger.exception(f"[NaviInteraction] Error: {e}")
-                continue
-
-            try:
-                if isinstance(full_response, str):
-                    full_response = extract_json(full_response)
-            except Exception as e:
-                logger.warning(f"[NaviInteraction] JSON提取失败: {e}. Retrying...")
+                raw_response = message.content
+                if raw_response is None:
+                    raw_response = getattr(message, "reasoning_content", None)
+                    provider_fields = getattr(message, "provider_specific_fields", {}) or {}
+                    raw_response = raw_response or provider_fields.get("reasoning_content")
+            except Exception as error:
+                if _is_transient_error(error):
+                    await asyncio.sleep(min(2**attempt, 8))
+                logger.warning("[NaviInteraction] user model error: %s", error)
                 continue
 
-            if isinstance(full_response, dict):
-                keys = full_response.keys()
-                if {"current_status", "thought", "response"}.issubset(keys):
-                    response = full_response.pop("response")
-                    if isinstance(response, str):
-                        break
-                    else:
-                        logger.warning(
-                            f"[NaviInteraction] 无效响应: {response}"
-                        )
-                        continue
-                else:
-                    logger.warning(f"[NaviInteraction] 缺少必要字段: {keys}")
-                    continue
+            extracted = _extract_response_json(raw_response) if isinstance(raw_response, str) else None
+            if isinstance(extracted, dict) and _REQUIRED_RESPONSE_KEYS <= extracted.keys():
+                candidate = extracted.get("response")
+                if isinstance(candidate, str):
+                    response = candidate
+                    satisfaction = _safe_satisfaction(extracted.get(_SATISFACTION_KEY))
+                    state["fallback_count"] = 0
+                    break
+            plain = (raw_response or "").strip().strip('"').strip("'") if isinstance(raw_response, str) else ""
+            if plain and not _looks_like_meta(plain):
+                response = plain
+                state["fallback_count"] = 0
+                break
 
-        if not response:
-            logger.error(
-                f"[NaviInteraction] generate_response exhausted {self.num_retries} retries without a usable "
-                f"reply for instance_id={instance_id}; terminating sequence to avoid training on an empty turn."
-            )
-            return True, response, 0.0, {}
+        is_fallback = not response
+        if is_fallback:
+            fallback_count = int(state.get("fallback_count", 0))
+            if fallback_count == 0:
+                response = interaction_kwargs.get("single_turn_prompt") or "请继续帮我处理导航任务。"
+            else:
+                response = _FALLBACK_FOLLOWUPS[(fallback_count - 1) % len(_FALLBACK_FOLLOWUPS)]
+            state["fallback_count"] = fallback_count + 1
 
-        self._instance_dict[instance_id]["response"] = response
-        logger.debug(f"[NaviInteraction] User: {response}")
-
-        # 是否终止完全由模型按 prompt 指示输出的终止信号决定，不再用"谢谢"/"好的"等
-        # 常见礼貌用语做兜底匹配——这些词在正常追问里也很常见，会把还没结束的对话提前截断。
-        should_terminate_sequence = self.termination_signal in response
-
-        reward = 0.0
-
-        return should_terminate_sequence, response, reward, {}
+        state["response"] = response
+        should_terminate = self.termination_signal in response
+        reward = satisfaction if satisfaction is not None else 0.0
+        metrics = {"has_satisfaction": satisfaction is not None, "is_fallback": is_fallback}
+        return should_terminate, response, reward, metrics
 
     async def finalize_interaction(self, instance_id: str, **kwargs) -> None:
-        """结束交互实例"""
-        if instance_id in self._instance_dict:
-            del self._instance_dict[instance_id]
+        self._instance_dict.pop(instance_id, None)
 
-    def _parse_messages(self, messages, strip_sys_prompt=True):
-        """解析消息列表为对话历史字符串"""
+    def _parse_messages(self, messages, strip_sys_prompt=True) -> str:
         if messages is None:
             return ""
-
+        normalized = []
+        for message in messages:
+            if isinstance(message, str):
+                normalized.append({"role": "assistant", "content": message})
+            elif isinstance(message, dict):
+                normalized.append(message)
         if strip_sys_prompt:
-            messages = [msg for msg in messages if msg["role"] != "system"]
+            normalized = [message for message in normalized if message.get("role") != "system"]
+        normalized = [self._fill_notify_content(self._remove_think_block(message)) for message in normalized]
 
-        messages = [self._remove_think_block(msg) for msg in messages]
+        chat_lines = []
+        tool_names_by_id: dict[str, str] = {}
+        pending_tool_names: list[str] = []
+        for message in normalized:
+            role = message.get("role")
+            if role == "assistant":
+                chat_lines.append(f"**Assistant**: {message.get('content') or ''}")
+                for tool_call in message.get("tool_calls") or []:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    function = tool_call.get("function")
+                    if not isinstance(function, dict) or not function.get("name"):
+                        continue
+                    tool_name = function["name"]
+                    pending_tool_names.append(tool_name)
+                    if tool_call.get("id") is not None:
+                        tool_names_by_id[str(tool_call["id"])] = tool_name
+                    if tool_name not in NOTIFY_TOOLS:
+                        summary = self._tool_call_summary(tool_name, function.get("arguments"))
+                        chat_lines.append(f"**[AI动作]** {summary}")
+            elif role == "tool":
+                call_id = message.get("tool_call_id")
+                tool_name = tool_names_by_id.get(str(call_id)) if call_id is not None else None
+                if tool_name is None and pending_tool_names:
+                    tool_name = pending_tool_names.pop(0)
+                elif tool_name in pending_tool_names:
+                    pending_tool_names.remove(tool_name)
+                if tool_name is None or tool_name in USER_VISIBLE_TOOL_RESULTS:
+                    chat_lines.append(f"**Tool**: {message.get('content') or ''}")
+            else:
+                label = role.capitalize() if role else "Unknown"
+                chat_lines.append(f"**{label}**: {message.get('content') or ''}")
+        return "\n".join(chat_lines)
 
-        chat = "\n".join(
-            f"**{m['role'].capitalize()}**: {m.get('content', '')}"
-            for m in messages
-        )
+    @staticmethod
+    def _fill_notify_content(message: dict) -> dict:
+        if message.get("role") != "assistant":
+            return message
+        parts = []
+        content = message.get("content")
+        if isinstance(content, str):
+            content = re.sub(r"<\|im_\w+\|>", "", content).strip()
+            if content:
+                parts.append(content)
+        for tool_call in message.get("tool_calls") or []:
+            function = tool_call.get("function", {}) if isinstance(tool_call, dict) else {}
+            if not isinstance(function, dict) or function.get("name") not in NOTIFY_TOOLS:
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            if isinstance(arguments, dict) and isinstance(arguments.get("msg"), str) and arguments["msg"]:
+                parts.append(arguments["msg"])
+        if not parts:
+            return message
+        result = dict(message)
+        result["content"] = "\n".join(parts)
+        return result
 
-        return chat
+    @staticmethod
+    def _tool_call_summary(tool_name: str, arguments: Any) -> str:
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        fields_by_tool = {
+            "poi_search": ("keyword", "mode"),
+            "charging_station_search": ("keyword", "mode"),
+            "navigation_start": ("desLocationReference", "routeType", "mode"),
+            "navigation_route": ("mode", "routeType"),
+            "navigation_control": ("action",),
+            "navigation_mapZoom": ("action",),
+            "navigation_memory": ("operation", "name"),
+            "filter": ("distance_min", "distance_max", "rating_min", "rating_max"),
+            "wiki_search": ("query",),
+            "memory_search": ("query",),
+        }
+        parts = [f"调用了 {tool_name}"]
+        for field in fields_by_tool.get(tool_name, ()):
+            value = arguments.get(field)
+            if value not in (None, "", []):
+                rendered = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
+                parts.append(f"{field}={rendered[:80]}")
+        return ", ".join(parts)
 
-    def _remove_think_block(self, msg: dict):
-        """移除think块"""
-        if "content" in msg and isinstance(msg["content"], str):
-            msg["content"] = re.sub(r"<tool_call>.*?uaiya>", "", msg["content"], flags=re.DOTALL).strip()
-        return msg
+    @staticmethod
+    def _remove_think_block(message: dict) -> dict:
+        content = message.get("content")
+        if not isinstance(content, str):
+            return message
+        result = dict(message)
+        result["content"] = re.sub(r"<tool_call>.*?uaiya>", "", content, flags=re.DOTALL).strip()
+        return result
