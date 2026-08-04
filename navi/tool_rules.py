@@ -34,6 +34,18 @@ ALLOWED_APIS = {
     "navigation_roadcondition_query", "share_poi", "navigation_memory", "filter",
 }
 
+# Tools whose arguments are spoken directly to the user.
+NOTIFY_TOOLS = {"notify_sa_msg", "notify_user_msg"}
+
+# Results exposed on the in-car UI; internal retrieval results stay hidden.
+USER_VISIBLE_TOOL_RESULTS = {
+    "poi_search", "charging_station_search", "navigation_start", "navigation_route",
+    "navigation_control", "navigation_mapZoom", "navigation_function_switch",
+    "navigation_broadCastMode_set", "navigation_info_query",
+    "navigation_roadcondition_query", "share_poi", "navigation_memory", "filter",
+    "get_current_location", "parkSpot_display", "calculate_distance",
+}
+
 _ROUTE_TYPES = {"智能推荐", "速度最快", "不走高速", "高速优先", "避免拥堵", "避免收费", "大路优先"}
 
 
