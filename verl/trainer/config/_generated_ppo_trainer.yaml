@@ -790,6 +790,8 @@ distillation:
     _target_: verl.workers.config.DistillationLossConfig
     loss_mode: k3
     topk: 32
+    use_chunked_topk: false
+    chunked_topk_chunk_size: 4096
     use_task_rewards: true
     distillation_loss_coef: 1.0
     loss_max_clamp: null

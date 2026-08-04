@@ -26,6 +26,13 @@ distillation_loss:
   # If distillation loss requires top-k logits, this is the value of k
   topk: 32
 
+  # Whether to compute forward-KL top-k log probabilities in token chunks to
+  # reduce peak memory for long sequences and large vocabularies.
+  use_chunked_topk: false
+
+  # Number of flattened tokens processed per chunk when chunking is enabled.
+  chunked_topk_chunk_size: 4096
+
   # Whether to include task rewards alongside distillation loss.
   use_task_rewards: true
 
