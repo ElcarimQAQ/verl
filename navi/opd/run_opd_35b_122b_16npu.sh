@@ -114,7 +114,7 @@ DATA=(
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.filter_overlong_prompts=True
     data.truncation=error
-    reward.custom_reward_function.path="${PROJECT_DIR}/navi/reward_function.py"
+    reward.custom_reward_function.path="${PROJECT_DIR}/navi/opd/opd_smoke_reward.py"
     reward.custom_reward_function.name=compute_score
 )
 
