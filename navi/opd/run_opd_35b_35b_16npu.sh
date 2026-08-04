@@ -69,18 +69,19 @@ TEACHER_NPUS_PER_NODE=${TEACHER_NPUS_PER_NODE:-8}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
 TEACHER_TP=${TEACHER_TP:-8}
 TEACHER_EP=${TEACHER_EP:-8}
+SP_SIZE=${SP_SIZE:-2}
 
 # Long rounds can approach 15K prompt tokens. Keep the global batch modest so
 # rollout/teacher request bursts do not exhaust KV cache on 64-GB 910Bs.
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-4}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-4}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-14960}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
 MAX_NUM_TOKENS=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 1))
 MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-16384}
 
-ACTOR_GPU_MEMORY_UTILIZATION=${ACTOR_GPU_MEMORY_UTILIZATION:-0.30}
-TEACHER_GPU_MEMORY_UTILIZATION=${TEACHER_GPU_MEMORY_UTILIZATION:-0.60}
+ACTOR_GPU_MEMORY_UTILIZATION=${ACTOR_GPU_MEMORY_UTILIZATION:-0.25}
+TEACHER_GPU_MEMORY_UTILIZATION=${TEACHER_GPU_MEMORY_UTILIZATION:-0.50}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-8}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 
@@ -90,6 +91,14 @@ if ((TEACHER_NPUS_PER_NODE * NNODES < TEACHER_TP)); then
 fi
 if (((TEACHER_NPUS_PER_NODE * NNODES) % TEACHER_TP != 0)); then
     echo "Teacher pool size must be divisible by TEACHER_TP=${TEACHER_TP}." >&2
+    exit 2
+fi
+if (((ACTOR_NPUS_PER_NODE * NNODES) % SP_SIZE != 0)); then
+    echo "Actor pool size must be divisible by SP_SIZE=${SP_SIZE}." >&2
+    exit 2
+fi
+if ((MAX_TOKEN_LEN_PER_GPU < MAX_NUM_TOKENS)); then
+    echo "MAX_TOKEN_LEN_PER_GPU must be at least ${MAX_NUM_TOKENS}." >&2
     exit 2
 fi
 for required_path in "${STUDENT_MODEL}" "${TEACHER_MODEL}" "${TRAIN_FILE}" "${VAL_FILE}"; do
@@ -133,10 +142,12 @@ ACTOR=(
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.use_kl_loss=False
     actor_rollout_ref.actor.use_torch_compile=False
+    actor_rollout_ref.actor.entropy_from_logits_with_chunking=True
+    actor_rollout_ref.actor.entropy_from_logits_chunk_size=512
     actor_rollout_ref.actor.strategy=fsdp2
     actor_rollout_ref.actor.fsdp_config.reshard_after_forward=True
     actor_rollout_ref.actor.fsdp_config.entropy_checkpointing=True
-    actor_rollout_ref.actor.fsdp_config.entropy_from_logits_with_chunking=False
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
     actor_rollout_ref.actor.fsdp_config.offload_policy=True
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
@@ -148,7 +159,8 @@ REF=(
     actor_rollout_ref.ref.fsdp_config.offload_policy=True
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     actor_rollout_ref.ref.fsdp_config.reshard_after_forward=True
-    actor_rollout_ref.ref.fsdp_config.entropy_from_logits_with_chunking=False
+    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True
+    actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE}
     actor_rollout_ref.ref.use_torch_compile=False
 )
 
@@ -192,7 +204,7 @@ DISTILLATION=(
     distillation.distillation_loss.loss_mode=forward_kl_topk
     distillation.distillation_loss.topk=${DISTILLATION_TOPK}
     distillation.distillation_loss.use_chunked_topk=True
-    distillation.distillation_loss.chunked_topk_chunk_size=1024
+    distillation.distillation_loss.chunked_topk_chunk_size=512
     distillation.distillation_loss.use_task_rewards=False
     distillation.distillation_loss.use_policy_gradient=False
     distillation.distillation_loss.loss_max_clamp=10.0

@@ -42,7 +42,7 @@ NPU 8-15   teacher resource pool
 
 | 组件 | NPU 数 | 并行方式 |
 | --- | ---: | --- |
-| Actor pool | 8 | FSDP2；rollout TP=2 |
+| Actor pool | 8 | FSDP2；rollout TP=2；35B→35B 默认 SP=2 |
 | Teacher pool | 8 | TP=8、EP=8、单 replica |
 
 单 teacher 的 replica 数由 verl 自动计算：
@@ -137,11 +137,11 @@ bash navi/opd/run_opd_35b_122b_16npu.sh
 
 ## 默认长度与 batch
 
-两份脚本默认：
+35B→35B 脚本默认：
 
 ```text
-train batch                 8
-PPO mini batch              8
+train batch                 4
+PPO mini batch              4
 micro batch per GPU         1
 max prompt length       14960
 max response length       512
@@ -189,7 +189,7 @@ topk                   8
 use_policy_gradient    False
 use_task_rewards       False
 chunked top-k          True
-chunk size             1024 tokens
+chunk size              512 tokens
 ```
 
 含义：
@@ -226,8 +226,9 @@ use_policy_gradient=False
 - actor 与 rollout log-prob dynamic batching；
 - rollout TP=2；
 - teacher TP=8/EP=8；
-- actor vLLM utilization 0.30；
-- teacher vLLM utilization 0.60；
+- actor Ulysses sequence parallel size 2；
+- actor vLLM utilization 0.25；
+- teacher vLLM utilization 0.50；
 - chunked forward-KL top-k。
 
 第一次运行建议使用更保守参数：
