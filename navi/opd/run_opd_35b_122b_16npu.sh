@@ -70,15 +70,17 @@ ROLLOUT_TP=${ROLLOUT_TP:-2}
 TEACHER_TP=${TEACHER_TP:-8}
 TEACHER_EP=${TEACHER_EP:-8}
 
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-16}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-16}
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-2048}
+# Long rounds can approach 15K prompt tokens. Keep the global batch modest so
+# rollout/teacher request bursts do not exhaust KV cache on 64-GB 910Bs.
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-8}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-14960}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
 MAX_NUM_TOKENS=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 1))
-MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-4096}
+MAX_TOKEN_LEN_PER_GPU=${MAX_TOKEN_LEN_PER_GPU:-16384}
 
 ACTOR_GPU_MEMORY_UTILIZATION=${ACTOR_GPU_MEMORY_UTILIZATION:-0.30}
-TEACHER_GPU_MEMORY_UTILIZATION=${TEACHER_GPU_MEMORY_UTILIZATION:-0.80}
+TEACHER_GPU_MEMORY_UTILIZATION=${TEACHER_GPU_MEMORY_UTILIZATION:-0.60}
 DISTILLATION_TOPK=${DISTILLATION_TOPK:-8}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 
@@ -128,7 +130,7 @@ ACTOR=(
     actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU}
-    actor_rollout_ref.actor.use_dynamic_bsz=False
+    actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.use_kl_loss=False
     actor_rollout_ref.actor.use_torch_compile=False
     actor_rollout_ref.actor.strategy=fsdp2
@@ -158,7 +160,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.gpu_memory_utilization=${ACTOR_GPU_MEMORY_UTILIZATION}
     actor_rollout_ref.rollout.n=1
     actor_rollout_ref.rollout.max_model_len=${MAX_NUM_TOKENS}
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.calculate_log_probs=True
 )
 
@@ -189,6 +191,8 @@ DISTILLATION=(
     distillation.teacher_models.teacher_model.inference.enforce_eager=true
     distillation.distillation_loss.loss_mode=forward_kl_topk
     distillation.distillation_loss.topk=${DISTILLATION_TOPK}
+    distillation.distillation_loss.use_chunked_topk=True
+    distillation.distillation_loss.chunked_topk_chunk_size=1024
     distillation.distillation_loss.use_task_rewards=False
     distillation.distillation_loss.use_policy_gradient=False
     distillation.distillation_loss.loss_max_clamp=10.0
